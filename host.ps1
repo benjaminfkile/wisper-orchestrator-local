@@ -43,7 +43,13 @@ param(
     [switch]$Down,
     [switch]$Status,
     [int]$WispPort = 3009,
-    [int]$ApiPort = 3006
+    [int]$ApiPort = 3006,
+    # How long the agent waits for wisp's create-contract call (Go duration,
+    # e.g. "50m"). Lease creation is SYNCHRONOUS through the container's entire
+    # userdata provision (fx-sandbox-base builds ~6 min, worst case much
+    # longer); the agent's built-in default is a fatal 60s. Must match the
+    # manager/orchestrator ceilings - see LEASE-TIMEOUTS-RUNBOOK.md.
+    [string]$CreateTimeout = "50m"
 )
 
 $ErrorActionPreference = "Stop"
@@ -383,7 +389,8 @@ $pids."wisp-agent" = Start-Svc -Name "wisp-agent" -File $agentExe -Cwd (Split-Pa
     "--manager", "ws://127.0.0.1:$ApiPort/agent",
     "--host-token", $state.host.agentToken,
     "--wisp", $WispUrl,
-    "--wisp-token", $state.wispAppToken
+    "--wisp-token", $state.wispAppToken,
+    "--wisp-create-timeout", $CreateTimeout
 )
 Save-Pids $pids
 

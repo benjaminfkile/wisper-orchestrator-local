@@ -35,7 +35,13 @@ param(
     [int]$ApiPort = 3006,
     [int]$WebPort = 3007,
     [int]$AdminPort = 3008,
-    [string]$PgVersion = "17.5-3"
+    [string]$PgVersion = "17.5-3",
+    # Tunnel relay deadline (ms) for a single host request, incl. lease.create.
+    # Lease creation is SYNCHRONOUS through the container's entire userdata
+    # provision (fx-sandbox-base builds ~6 min, worst case much longer), so this
+    # must exceed the longest provision. Default 50 min; wisper-api's built-in
+    # default is a fatal 120s. See LEASE-TIMEOUTS-RUNBOOK.md.
+    [int]$RelayTimeoutMs = 3000000
 )
 
 $ErrorActionPreference = "Stop"
@@ -401,6 +407,7 @@ $pids."wisper-api" = Start-Svc -Name "wisper-api" -File "dotnet" `
         ConnectionStrings__Wisper        = "Host=127.0.0.1;Port=$PgPort;Database=wisper;Username=wisper;Password=$($state.pgWisperPassword)"
         Tunnel__EnableDevEndpoints       = "true"
         Tunnel__ManagerWebSocketUrl      = "ws://127.0.0.1:$ApiPort/agent"
+        Tunnel__RelayRequestTimeoutMs    = "$RelayTimeoutMs"
         "Auth__ApiKeys__${k}__UserId"    = $state.wckUserId
         "Auth__ApiKeys__${k}__Email"     = $state.wckEmail
         "Auth__ApiKeys__${k}__Scopes__0" = "consumer"

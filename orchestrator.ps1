@@ -38,7 +38,13 @@ param(
     [switch]$Status,
     [int]$OrchPort = 3010,
     [int]$WebUiPort = 4400,
-    [int]$ApiPort = 3006        # the local wisper-api (see wisper.ps1)
+    [int]$ApiPort = 3006,       # the local wisper-api (see wisper.ps1)
+    # How long the orchestrator waits for wisper's create-lease call (ms).
+    # Lease creation is SYNCHRONOUS through the container's entire userdata
+    # provision (fx-sandbox-base builds ~6 min, worst case much longer); the
+    # orchestrator's built-in default is a fatal 150s. Keep below the playbook's
+    # ttl_seconds - 60 dispatch deadline - see LEASE-TIMEOUTS-RUNBOOK.md.
+    [int]$CreateLeaseTimeoutMs = 3000000
 )
 
 $ErrorActionPreference = "Stop"
@@ -292,6 +298,7 @@ $pids.orchestrator = Start-Svc -Name "orchestrator" -File $node -Arguments @($di
     WISPER_MODE     = "v1"
     WISPER_BASE_URL = $WisperUrl
     WISPER_HOST_ID  = "local-host"
+    WISPER_CREATE_LEASE_TIMEOUT_MS = "$CreateLeaseTimeoutMs"
 }
 Save-Pids $pids   # save after every start so -Down can clean up a failed run
 Wait-Http -Url "$OrchUrl/api/health" -TimeoutSec 60 -Name "orchestrator"
