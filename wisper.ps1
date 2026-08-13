@@ -418,14 +418,86 @@ Save-Pids $pids   # save after every start so -Down can clean up a failed run
 # First boot after a refetch runs DbUp migrations - allow extra time.
 Wait-Http -Url "$ApiUrl/healthz" -TimeoutSec 120 -Name "wisper-api"
 
+# ---- Fund the dev wallet -------------------------------------------------------
+# Seed the wck user's wallet with a huge balance so PRICED leases "just work"
+# with no Stripe (see host.ps1 for the priced default image). Pure data seed via
+# a balanced double-entry topup (credit user_wallet / debit platform_cash) that
+# respects the ledger triggers - NO wisper-api code change. Idempotent (guarded
+# by a ledger idempotency_key), so it funds once per database and self-heals
+# after a pgdata wipe. Edit $FundCents to change the amount.
+$FundCents = [long]100000000000   # $1,000,000,000.00
+$seedFile = Join-Path $Dirs.State "fund-wallet.sql"
+try {
+    $seedSql = @'
+DO $fund$
+DECLARE
+  v_user   uuid;
+  v_wallet uuid;
+  v_cash   uuid;
+  v_txn    uuid;
+BEGIN
+  INSERT INTO users (cognito_sub, email, status)
+    VALUES ('__SUB__', '__EMAIL__', 'active')
+    ON CONFLICT (cognito_sub) DO NOTHING;
+  SELECT id INTO v_user FROM users WHERE cognito_sub = '__SUB__';
+
+  -- The host owner (this same wck user) must be Connect-enabled to advertise a
+  -- PRICED image and go online (Domain/ConnectGate.ChargesRequireConnect). No
+  -- Stripe locally, so flip it directly.
+  UPDATE users SET connect_status = 'enabled' WHERE id = v_user AND connect_status <> 'enabled';
+
+  -- Paid metering needs an active platform_policy row: MeteringService's fee
+  -- split calls GetActiveOrThrowAsync, so with ZERO rows a priced lease's meter
+  -- flush throws (free leases never hit it). Seed one 10% policy if none exists.
+  INSERT INTO platform_policy (fee_bps)
+    SELECT 1000 WHERE NOT EXISTS (SELECT 1 FROM platform_policy);
+
+  INSERT INTO ledger_accounts (kind, owner_user_id, currency)
+    VALUES ('user_wallet', v_user, 'usd')
+    ON CONFLICT (kind, owner_user_id) DO NOTHING;
+  SELECT id INTO v_wallet FROM ledger_accounts
+    WHERE kind = 'user_wallet' AND owner_user_id = v_user;
+
+  INSERT INTO ledger_accounts (kind, owner_user_id, currency)
+    VALUES ('platform_cash', NULL, 'usd')
+    ON CONFLICT DO NOTHING;
+  SELECT id INTO v_cash FROM ledger_accounts
+    WHERE kind = 'platform_cash' AND owner_user_id IS NULL;
+
+  IF NOT EXISTS (SELECT 1 FROM ledger_transactions
+                 WHERE idempotency_key = 'seed:local-bootstrap-fund') THEN
+    INSERT INTO ledger_transactions (kind, idempotency_key, memo)
+      VALUES ('topup', 'seed:local-bootstrap-fund', 'local bootstrap: fund dev wallet')
+      RETURNING id INTO v_txn;
+    INSERT INTO ledger_entries (transaction_id, account_id, credit_cents) VALUES (v_txn, v_wallet, __AMOUNT__);
+    INSERT INTO ledger_entries (transaction_id, account_id, debit_cents)  VALUES (v_txn, v_cash,   __AMOUNT__);
+  END IF;
+END $fund$;
+'@
+    $seedSql = $seedSql.Replace('__SUB__', $state.wckUserId).Replace('__EMAIL__', $state.wckEmail).Replace('__AMOUNT__', "$FundCents")
+    [System.IO.File]::WriteAllText($seedFile, $seedSql)
+    $env:PGPASSWORD = $state.pgWisperPassword
+    $pg = @("-h", "127.0.0.1", "-p", "$PgPort", "-U", "wisper", "-d", "wisper")
+    & (Get-PgBin "psql.exe") @pg -v ON_ERROR_STOP=1 -q -f $seedFile | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $bal = Invoke-Capture (Get-PgBin "psql.exe") ($pg + @("-tAc", "SELECT a.balance_cents FROM ledger_accounts a JOIN users u ON u.id = a.owner_user_id WHERE a.kind='user_wallet' AND u.cognito_sub='$($state.wckUserId)'"))
+        Write-Host "  funded dev wallet: $bal cents ($($state.wckEmail))" -ForegroundColor Green
+    } else {
+        Write-Warning "wallet funding seed failed - stack still usable but the wallet is unfunded (priced leases will 402). See logs."
+    }
+} finally {
+    Remove-Item Env:\PGPASSWORD -ErrorAction SilentlyContinue
+    Remove-Item $seedFile -ErrorAction SilentlyContinue
+}
+
 $npm = (Get-Command npm.cmd).Source
 $pids."wisper-web" = Start-Svc -Name "wisper-web" -File $npm `
     -Arguments @("run", "dev", "--", "-p", "$WebPort", "-H", "127.0.0.1") `
-    -Cwd (Join-Path $Dirs.Repos "wisper-web") -Env @{ WISPER_API_URL = $ApiUrl }
+    -Cwd (Join-Path $Dirs.Repos "wisper-web") -Env @{ WISPER_API_URL = $ApiUrl; NEXT_PUBLIC_WISPER_API_ORIGIN = $ApiUrl }
 Save-Pids $pids
 $pids."wisper-admin" = Start-Svc -Name "wisper-admin" -File $npm `
     -Arguments @("run", "dev", "--", "-p", "$AdminPort", "-H", "127.0.0.1") `
-    -Cwd (Join-Path $Dirs.Repos "wisper-admin") -Env @{ WISPER_API_URL = $ApiUrl }
+    -Cwd (Join-Path $Dirs.Repos "wisper-admin") -Env @{ WISPER_API_URL = $ApiUrl; NEXT_PUBLIC_WISPER_API_ORIGIN = $ApiUrl }
 Save-Pids $pids
 # Dev servers may bind IPv6 ::1 - probe localhost, not 127.0.0.1.
 Wait-Http -Url "http://localhost:$WebPort" -TimeoutSec 90 -Name "wisper-web"

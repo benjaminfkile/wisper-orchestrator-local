@@ -277,8 +277,21 @@ if ($needClone.Count -gt 0) {
     Invoke-HostBuilds
 
     # wisp config: image allow-list + limits. No BOM - Go's JSON decoder is strict.
+    # Seeded ONCE; wisp reads it via WISP_CONFIG and this block never overwrites an
+    # existing file, so YOUR limits survive -Down/up. To change them, edit limits.*
+    # in config\wisp.config.json and re-run host.ps1 (0 = unlimited). Two kinds of cap:
+    #   max_cpus / max_memory_mb     = PER-LEASE ceiling (one lease's max). These are
+    #       what wisp advertises to the manager; the image editor bounds vCPU/RAM by
+    #       them, and 0 here is exactly what makes it warn "not reporting per-lease
+    #       capacity".
+    #   total_cpus / total_memory_mb = AGGREGATE budget across ALL concurrent leases.
+    # Defaults below are HALF of whatever machine this runs on (auto-detected - no
+    # machine-specific numbers hardcoded); total must be >= max (wisp validates this).
     $wispConfig = Join-Path $Dirs.Config "wisp.config.json"
     if (-not (Test-Path $wispConfig)) {
+        $cs = Get-CimInstance Win32_ComputerSystem
+        $capCpus  = [int][math]::Max(1,   [math]::Floor($cs.NumberOfLogicalProcessors / 2))
+        $capMemMB = [int][math]::Max(512, [math]::Floor(($cs.TotalPhysicalMemory / 1MB) / 2))
         [System.IO.File]::WriteAllText($wispConfig, @"
 {
   "images": {
@@ -287,15 +300,17 @@ if ($needClone.Count -gt 0) {
   },
   "limits": {
     "max_ttl_seconds": 0,
-    "max_cpus": 0,
-    "max_memory_mb": 0,
+    "max_cpus": $capCpus,
+    "max_memory_mb": $capMemMB,
     "pids_limit": 0,
+    "total_cpus": $capCpus,
+    "total_memory_mb": $capMemMB,
     "networks": ["none", "open"],
     "isolations": ["shared"]
   }
 }
 "@)
-        Write-Host "  wrote config\wisp.config.json"
+        Write-Host "  wrote config\wisp.config.json (per-lease + aggregate caps = half this machine: $capCpus cpus / $capMemMB MB - edit limits.* + re-run to change)"
     }
 
     # Base image: wisp never pulls images, so the local daemon needs one built.
@@ -420,7 +435,10 @@ if ($null -eq $state.hostImages) {
     Set-StateProp $state "hostImages" @(
         [pscustomobject]@{
             image_ref           = $imageRef
-            price_cents_per_min = 0
+            # ~$20/hr. price is integer cents-PER-MINUTE, so $20/hr (=33.33c/min)
+            # isn't exact; 33 = $19.80/hr (closest under). Edit here or in
+            # state\stack-state.json + re-run host.ps1 to change what's advertised.
+            price_cents_per_min = 33
             networks            = @("none", "open")
             max_ttl_seconds     = 3600
             enabled             = $true
